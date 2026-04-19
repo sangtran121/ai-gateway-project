@@ -1,0 +1,34 @@
+name: DevSecOps AI Gateway Pipeline
+
+# Kích hoạt robot mỗi khi có code mới được đẩy (push) lên nhánh main
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest # GitHub sẽ cấp cho bạn một máy chủ ảo Ubuntu miễn phí
+
+    steps:
+    - name: 📥 Clone mã nguồn từ kho lưu trữ
+      uses: actions/checkout@v3
+
+    - name: 🐳 Khởi động toàn bộ Hệ thống qua Docker Compose
+      run: |
+        docker compose up -d --build
+        docker compose ps # In ra trạng thái để dễ debug
+
+    - name: 🐍 Cài đặt Python cho bài Test
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: 📦 Cài đặt thư viện requests
+      run: pip install requests
+
+    - name: ⚔️ Chạy Kịch bản Thực nghiệm Tấn công (Automated Testing)
+      run: python test_api.py
+
+    - name: 🧹 Dọn dẹp môi trường
+      if: always() # Luôn chạy bước này dù test pass hay fail
+      run: docker compose down
