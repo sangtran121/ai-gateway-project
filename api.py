@@ -108,8 +108,14 @@ async def verify_gateway(x_original_uri: str = Header(None)):
     prediction = model.predict(vectorized_text)[0]
     
     if prediction == 1:
-        logger.warning(f"[CHẶN] Phát hiện SQLi trên URL (sau chuẩn hóa): {normalized_uri}")
+        # Lấy xác suất tự tin của AI (Xác suất nó cho rằng đây là Nhãn 1 - SQLi)
+        probabilities = model.predict_proba(vectorized_text)[0]
+        confidence = probabilities[1] 
+        
+        # In thêm biến {confidence} vào log
+        logger.warning(f"[CHẶN] Phát hiện SQLi (Tỷ lệ: {confidence:.2f}) trên URL: {normalized_uri}")
         raise HTTPException(status_code=403, detail="SQL Injection Detected")
+    # ------------------------------------
     
     logger.info(f"[HỢP LỆ] URL an toàn: {normalized_uri}")
     return Response(status_code=200)
