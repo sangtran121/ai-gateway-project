@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Xác minh bảo mật</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f4f9; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .captcha-box { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); text-align: center; max-width: 400px; }
+        h2 { color: #d9534f; margin-bottom: 10px; }
+        p { color: #555; margin-bottom: 25px; line-height: 1.5; }
+        .btn { background: #0275d8; color: white; border: none; padding: 12px 25px; font-size: 16px; border-radius: 5px; cursor: pointer; transition: 0.3s; }
+        .btn:hover { background: #025aa5; }
+        #success-msg { color: #5cb85c; font-weight: bold; margin-top: 15px; display: none; }
+    </style>
+</head>
+<body>
+    <div class="captcha-box">
+        <h2>Hệ thống nghi ngờ tự động</h2>
+        <p>Hệ thống AI Gateway nhận thấy truy vấn của bạn có dấu hiệu bất thường. Vui lòng xác minh bạn là người thật để tiếp tục.</p>
+        <button class="btn" id="verifyBtn" onclick="solveCaptcha()">✅ Tôi là con người</button>
+        <p id="success-msg">Xác minh thành công! Đang tải lại trang...</p>
+    </div>
+
+    <script>
+        function solveCaptcha() {
+            document.getElementById('verifyBtn').innerText = "Đang xử lý...";
+            
+            // LƯU Ý QUAN TRỌNG: Chỉ dùng '/solve-captcha' để Nginx tự động chuyển tiếp
+            fetch("/solve-captcha", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ "ip_address": "172.18.0.1" }) 
+            })
+            .then(res => {
+                if (!res.ok) throw new Error("Mạng lỗi!");
+                return res.json();
+            })
+            .then(data => {
+                document.getElementById('verifyBtn').style.display = 'none';
+                document.getElementById('success-msg').style.display = 'block';
+                // Tải lại trang sau 2 giây (Lúc này có Thẻ VIP nên sẽ qua được)
+                setTimeout(() => { window.location.reload(); }, 2000);
+            })
+            .catch(err => {
+                console.error(err);
+                alert("Lỗi hệ thống! Vui lòng ấn F12 xem tab Console.");
+                document.getElementById('verifyBtn').innerText = "Thử lại";
+            });
+        }
+    </script>
+</body>
+</html>

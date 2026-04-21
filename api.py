@@ -4,112 +4,122 @@ import joblib
 import logging
 import urllib.parse
 import re
+import redis
+import uuid
 
-# Cấu hình log để dễ theo dõi
+# Cấu hình log
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Khởi tạo ứng dụng FastAPI
 app = FastAPI(title="AI Security Gateway API", description="API kiểm duyệt SQL Injection")
 
-# Tải mô hình và vectorizer vào bộ nhớ
-logger.info("Đang tải mô hình Machine Learning...")
+# --- KHỞI TẠO REDIS ---
+redis_client = None
+try:
+    redis_client = redis.Redis(host='redis', port=6379, db=0, decode_responses=True, socket_connect_timeout=5)
+    redis_client.ping()
+    logger.info("✅ Kết nối Redis Cache thành công!")
+except Exception as e:
+    logger.warning(f"⚠️ Lỗi kết nối Redis: {e}")
+
+# --- TẢI MÔ HÌNH ---
 try:
     model = joblib.load('models/rf_sqli_model.pkl')
     vectorizer = joblib.load('models/tfidf_vectorizer.pkl')
-    logger.info("Tải mô hình thành công!")
+    logger.info("✅ Tải mô hình thành công!")
 except Exception as e:
-    logger.error(f"Lỗi tải mô hình: {e}")
-    raise RuntimeError("Không tìm thấy file mô hình. Vui lòng chạy train_model.py trước.")
+    logger.error(f"❌ Lỗi tải mô hình: {e}")
 
 def normalize_payload(payload: str) -> str:
-    """
-    Module Chuẩn hóa dữ liệu (Data Normalization)
-    Giúp chống lại các kỹ thuật làm rối mã (Obfuscation)
-    """
-    if not payload:
-        return ""
-    
-    # 1. Giải mã URL (Ví dụ: %27 biến thành ')
+    if not payload: return ""
     text = urllib.parse.unquote(payload)
-    
-    # 2. Xóa các chú thích SQL kiểu /**/
     text = re.sub(r'/\*.*?\*/', '', text)
-    
-    # 3. Nén khoảng trắng thừa
     text = re.sub(r'\s+', ' ', text)
-    
-    # 4. Chuyển về chữ thường
-    text = text.lower().strip()
-    
-    return text
+    return text.lower().strip()
 
-# Định nghĩa cấu trúc dữ liệu đầu vào
 class QueryRequest(BaseModel):
     query: str
 
+# API Phân tích cũ (Giữ nguyên để không mất chức năng)
 @app.post("/analyze")
 async def analyze_query(request: QueryRequest):
     try:
-        raw_text = request.query
-        
-        # Đi qua module chuẩn hóa trước khi vào AI
-        normalized_text = normalize_payload(raw_text)
-        
+        normalized_text = normalize_payload(request.query)
         vectorized_text = vectorizer.transform([normalized_text])
         prediction = model.predict(vectorized_text)[0]
-        
-        probabilities = model.predict_proba(vectorized_text)[0]
-        confidence = probabilities[prediction]
+        confidence = model.predict_proba(vectorized_text)[0][prediction]
+        return {"query": request.query, "is_sqli": bool(prediction == 1), "confidence": round(confidence, 4)}
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
-        is_sqli = bool(prediction == 1)
-        
-        if is_sqli:
-            logger.warning(f"[CẢNH BÁO] Phát hiện SQLi (Tỷ lệ: {confidence:.2f}): {raw_text}")
-        else:
-            logger.info(f"[AN TOÀN] Truy vấn bình thường: {raw_text}")
+# API GIẢI CAPTCHA (Cấp thẻ bài dùng 1 lần)
+class CaptchaSolveRequest(BaseModel):
+    ip_address: str
 
-        return {
-            "query": request.query,
-            "normalized_query": normalized_text,
-            "is_sqli": is_sqli,
-            "confidence": round(confidence, 4)
-        }
+@app.post("/solve-captcha")
+async def solve_captcha(request: CaptchaSolveRequest):
+    if not redis_client: raise HTTPException(status_code=500, detail="Redis không hoạt động")
+    clearance_token = f"human_{uuid.uuid4().hex[:8]}"
+    # Thẻ bài chỉ có tác dụng trong 5 phút để user kịp F5 trang
+    redis_client.setex(f"captcha_clearance_{request.ip_address}", 300, clearance_token)
+    logger.info(f"🎉 [CAPTCHA SOLVED] IP {request.ip_address} đã xác minh. Thẻ bài: {clearance_token}")
+    return {"message": "Xác thực thành công!", "token": clearance_token}
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+# =========================================================
+# BỘ LỌC CỐT LÕI (KIẾN TRÚC 4 LỚP NÂNG CAO)
+# =========================================================
 @app.get("/verify")
-async def verify_gateway(x_original_uri: str = Header(None)):
-    """
-    Endpoint dành riêng cho Nginx Gateway.
-    """
-    if not x_original_uri:
+async def verify_gateway(x_original_uri: str = Header(None), x_real_ip: str = Header(None)):
+    if not x_original_uri: return Response(status_code=200)
+        
+    # LỚP 1: THREAT INTELLIGENCE (CHẶN IP ĐEN)
+    if x_real_ip:
+        GLOBAL_BLACKLIST = ["203.0.113.42", "198.51.100.77", "104.28.10.50"]
+        if x_real_ip in GLOBAL_BLACKLIST:
+            logger.error(f"🚨 [THREAT INTEL] Chặn IP đen: {x_real_ip}")
+            raise HTTPException(status_code=403, detail="Blacklisted IP")
+
+    # LỚP 2: WHITELIST
+    if x_original_uri in ["/", "/favicon.ico"]:
         return Response(status_code=200)
     
-    # --- THÊM LỚP WHITELIST Ở ĐÂY ---
-    # Các URL an toàn tuyệt đối không cần qua AI kiểm duyệt
-    safe_paths = ["/", "/favicon.ico"]
-    
-    # Tách lấy phần đường dẫn (bỏ phần tham số phía sau dấu ? nếu có để so sánh)
-    path_only = x_original_uri.split('?')[0]
-    
-    # Nếu đường dẫn không có tham số (chỉ là /) hoặc là favicon, cho qua luôn!
-    if x_original_uri in safe_paths:
-        logger.info(f"[WHITELIST] Bỏ qua kiểm tra AI cho đường dẫn an toàn: {x_original_uri}")
-        return Response(status_code=200)
-    # ---------------------------------
-    
-    # 1. Tiền xử lý: Đưa URL qua module chuẩn hóa dữ liệu
     normalized_uri = normalize_payload(x_original_uri)
-    
-    # 2. Đưa vào mô hình AI kiểm tra
-    vectorized_text = vectorizer.transform([normalized_uri])
-    prediction = model.predict(vectorized_text)[0]
-    
-    if prediction == 1:
-        logger.warning(f"[CHẶN] Phát hiện SQLi trên URL (sau chuẩn hóa): {normalized_uri}")
-        raise HTTPException(status_code=403, detail="SQL Injection Detected")
-    
-    logger.info(f"[HỢP LỆ] URL an toàn: {normalized_uri}")
-    return Response(status_code=200)
+
+    # LỚP 3: REDIS CACHE (CHỈ CACHE NHỮNG GÌ CHẮC CHẮN AN TOÀN)
+    if redis_client:
+        cached = redis_client.get(normalized_uri)
+        if cached == "0": return Response(status_code=200)
+
+    # LỚP 4: AI MODEL (KIỂM TRA NGHIÊM NGẶT)
+    try:
+        vectorized_text = vectorizer.transform([normalized_uri])
+        confidence = model.predict_proba(vectorized_text)[0][1] 
+
+        # MỨC 1: ĐỘC HẠI (>= 80%) -> Chặn vĩnh viễn
+        if confidence >= 0.80:
+            logger.warning(f"🤖 [AI: ĐỘC HẠI] {confidence:.2f} -> KHÓA: {normalized_uri}")
+            if redis_client: redis_client.setex(normalized_uri, 86400, "1")
+            raise HTTPException(status_code=403, detail="SQL Injection Detected")
+            
+        # MỨC 2: NGHI NGỜ (>= 20%) -> BẮT GIẢI CAPTCHA MỖI LẦN
+        elif confidence >= 0.20:
+            # Kiểm tra xem có thẻ bài vừa mới giải không?
+            if redis_client and x_real_ip:
+                has_token = redis_client.get(f"captcha_clearance_{x_real_ip}")
+                if has_token:
+                    logger.info(f"🛂 [VIP PASS] IP {x_real_ip} dùng thẻ bài qua cửa. Xóa thẻ ngay!")
+                    redis_client.delete(f"captcha_clearance_{x_real_ip}") # XÓA THẺ: Lần sau lại bắt giải tiếp
+                    return Response(status_code=200)
+
+            logger.warning(f"🤔 [AI: NGHI NGỜ] {confidence:.2f} -> BẬT CAPTCHA: {normalized_uri}")
+            raise HTTPException(status_code=401, detail="CAPTCHA Required")
+            
+        # MỨC 3: AN TOÀN (< 20%) -> Cho qua
+        else:
+            logger.info(f"✅ [AI: AN TOÀN] {confidence:.2f}: {normalized_uri}")
+            if redis_client: redis_client.setex(normalized_uri, 3600, "0")
+            return Response(status_code=200)
+        
+    except HTTPException: raise 
+    except Exception as e:
+        logger.error(f"❌ Lỗi: {e}")
+        return Response(status_code=200)
